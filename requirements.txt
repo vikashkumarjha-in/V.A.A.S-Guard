@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+httpx
+redis
+motor
+pydantic
+pydantic-settings
+websockets
+python-multipart
