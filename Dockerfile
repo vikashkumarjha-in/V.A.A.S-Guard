@@ -22,6 +22,5 @@ COPY --from=frontend-build /frontend/dist /app/static
 
 EXPOSE 10000
 
-ENV PORT=10000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+# Ensure the app uses the dynamic PORT env var
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}"]
