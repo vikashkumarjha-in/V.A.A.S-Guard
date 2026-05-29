@@ -1,19 +1,21 @@
+import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 class Settings(BaseSettings):
-    MONGODB_URL: str = "mongodb://mongodb:27017"
+    # PRIORITIZE RENDER ENV VARS
+    MONGODB_URL: str = os.environ.get("MONGODB_URL", "mongodb://localhost:27017")
     DATABASE_NAME: str = "vaas_guard"
-    REDIS_URL: str = "redis://redis:6379"
 
-    # LLM Settings
-    LLM_PROVIDER: str = "openai"  # "openai" or "anthropic"
-    OPENAI_API_KEY: Optional[str] = None
-    ANTHROPIC_API_KEY: Optional[str] = None
+    REDIS_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
-    TARGET_URL: str = "https://httpbin.org"
+    LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "openai")
+    OPENAI_API_KEY: Optional[str] = os.environ.get("OPENAI_API_KEY")
+    ANTHROPIC_API_KEY: Optional[str] = os.environ.get("ANTHROPIC_API_KEY")
+
+    TARGET_URL: str = os.environ.get("TARGET_URL", "https://httpbin.org")
     PROXY_TIMEOUT: float = 5.0
 
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()
