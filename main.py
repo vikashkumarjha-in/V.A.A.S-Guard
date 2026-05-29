@@ -34,7 +34,7 @@ class ConnectionManager:
             await websocket.accept()
             self.active_connections.append(websocket)
         except Exception as e:
-            logger.error(f"WebSocket connection failed: {e}")
+            logger.error(f"WS accept failed: {e}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
@@ -50,8 +50,8 @@ class ConnectionManager:
         for connection in self.active_connections:
             try:
                 await connection.send_text(msg_str)
-            except Exception as e:
-                logger.debug(f"Failed to send to a connection: {e}")
+            except Exception:
+                pass
 
 manager = ConnectionManager()
 
@@ -63,14 +63,13 @@ async def process_threat_explanation(event_dict: dict):
         try:
             await event_logger.update_explanation(event.event_id, explanation)
         except Exception as e:
-            logger.error(f"Failed to update MongoDB with explanation: {e}")
+            logger.error(f"Mongo update failed: {e}")
 
-        # Broadcast the updated event
         event.explanation = explanation
         event.status = "Analyzed"
         await manager.broadcast(event.dict())
     except Exception as e:
-        logger.error(f"Error in background task: {e}")
+        logger.error(f"LLM task failed: {e}")
 
 class RateLimiterWrapper:
     def __init__(self):
@@ -79,14 +78,13 @@ class RateLimiterWrapper:
         if self.limiter:
             try:
                 return await self.limiter.is_rate_limited(ip)
-            except Exception as e:
-                logger.error(f"Rate limiter check failed: {e}")
+            except Exception:
                 return False
         return False
 
 rate_limiter_wrapper = RateLimiterWrapper()
 
-# Add Middleware early as required
+# Middleware Registration
 app.add_middleware(
     SecurityMiddleware,
     rate_limiter=rate_limiter_wrapper,
@@ -94,33 +92,30 @@ app.add_middleware(
     background_processor=process_threat_explanation
 )
 
-# Startup
+# Lifecycle
 @app.on_event("startup")
 async def startup_event():
     try:
         await event_logger.initialize()
     except Exception as e:
-        logger.error(f"MongoDB initialization error: {e}")
+        logger.error(f"MongoDB offline: {e}")
 
     try:
         redis = Redis.from_url(settings.REDIS_URL)
         rate_limiter_wrapper.limiter = RateLimiter(redis)
         app.state.redis = redis
-        logger.info(f"Redis connected: {settings.REDIS_URL}")
+        logger.info(f"Redis linked: {settings.REDIS_URL}")
     except Exception as e:
-        logger.error(f"Redis connection error: {e}")
+        logger.error(f"Redis link failed: {e}")
 
-    logger.info("V.A.A.S Guard Started")
+    logger.info("V.A.A.S Guard Engine Running")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    try:
-        if hasattr(app.state, "redis"):
-            await app.state.redis.close()
-    except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
+    if hasattr(app.state, "redis"):
+        await app.state.redis.close()
 
-# Internal Routes
+# Routes
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -131,20 +126,18 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+    except Exception:
+        pass
+    finally:
         manager.disconnect(websocket)
 
-# Serve Frontend if build exists
+# Static Dashboard
 if os.path.exists("static"):
     app.mount("/dashboard", StaticFiles(directory="static", html=True), name="static")
 
-# Catch-all Proxy Logic
+# Transparent Proxy
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_handler(request: Request, path: str):
-    # Avoid proxying internal routes
     if path.startswith("dashboard") or path == "health" or path == "ws/logs":
          return Response(status_code=404)
 
@@ -156,18 +149,13 @@ async def proxy_handler(request: Request, path: str):
 
     try:
         content = await request.body()
-    except Exception as e:
-        logger.error(f"Failed to read request body: {e}")
+    except Exception:
         content = b""
 
     async with httpx.AsyncClient() as client:
         try:
             proxy_response = await client.request(
-                method,
-                url,
-                params=params,
-                headers=headers,
-                content=content,
+                method, url, params=params, headers=headers, content=content,
                 timeout=settings.PROXY_TIMEOUT
             )
             return StreamingResponse(
@@ -178,8 +166,8 @@ async def proxy_handler(request: Request, path: str):
         except httpx.TimeoutException:
             return Response(content="Gateway Timeout", status_code=504)
         except Exception as e:
-            logger.error(f"Proxy error: {e}")
-            return Response(content="Internal Server Error", status_code=500)
+            logger.error(f"Proxy fail: {e}")
+            return Response(content="Internal error", status_code=500)
 
 if __name__ == "__main__":
     import uvicorn
