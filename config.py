@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 class Settings(BaseSettings):
-    # prioritizes environment variables
+    # prioritizes environment variables for production
     MONGODB_URL: str = os.environ.get("MONGODB_URL", "mongodb://localhost:27017")
     DATABASE_NAME: str = "vaas_guard"
 

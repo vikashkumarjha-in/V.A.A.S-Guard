@@ -30,8 +30,11 @@ class ConnectionManager:
         self.active_connections: List[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
+        try:
+            await websocket.accept()
+            self.active_connections.append(websocket)
+        except Exception as e:
+            logger.error(f"WebSocket connection failed: {e}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
@@ -47,8 +50,8 @@ class ConnectionManager:
         for connection in self.active_connections:
             try:
                 await connection.send_text(msg_str)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to send to a connection: {e}")
 
 manager = ConnectionManager()
 
@@ -59,8 +62,9 @@ async def process_threat_explanation(event_dict: dict):
         explanation = await llm_explainer.explain_threat(event)
         try:
             await event_logger.update_explanation(event.event_id, explanation)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to update MongoDB with explanation: {e}")
+
         # Broadcast the updated event
         event.explanation = explanation
         event.status = "Analyzed"
@@ -73,12 +77,16 @@ class RateLimiterWrapper:
         self.limiter = None
     async def is_rate_limited(self, ip):
         if self.limiter:
-            return await self.limiter.is_rate_limited(ip)
+            try:
+                return await self.limiter.is_rate_limited(ip)
+            except Exception as e:
+                logger.error(f"Rate limiter check failed: {e}")
+                return False
         return False
 
 rate_limiter_wrapper = RateLimiterWrapper()
 
-# Add Middleware early
+# Add Middleware early as required
 app.add_middleware(
     SecurityMiddleware,
     rate_limiter=rate_limiter_wrapper,
@@ -92,23 +100,25 @@ async def startup_event():
     try:
         await event_logger.initialize()
     except Exception as e:
-        logger.error(f"MongoDB not available: {e}")
+        logger.error(f"MongoDB initialization error: {e}")
 
     try:
-        # Strictly use REDIS_URL from settings
         redis = Redis.from_url(settings.REDIS_URL)
         rate_limiter_wrapper.limiter = RateLimiter(redis)
         app.state.redis = redis
-        logger.info(f"Connected to Redis at {settings.REDIS_URL}")
+        logger.info(f"Redis connected: {settings.REDIS_URL}")
     except Exception as e:
-        logger.error(f"Redis connection failed: {e}")
+        logger.error(f"Redis connection error: {e}")
 
-    logger.info("V.A.A.S Guard Backend Started")
+    logger.info("V.A.A.S Guard Started")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    if hasattr(app.state, "redis"):
-        await app.state.redis.close()
+    try:
+        if hasattr(app.state, "redis"):
+            await app.state.redis.close()
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 # Internal Routes
 @app.get("/health")
@@ -123,7 +133,8 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-    except Exception:
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
 
 # Serve Frontend if build exists
@@ -133,6 +144,7 @@ if os.path.exists("static"):
 # Catch-all Proxy Logic
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_handler(request: Request, path: str):
+    # Avoid proxying internal routes
     if path.startswith("dashboard") or path == "health" or path == "ws/logs":
          return Response(status_code=404)
 
@@ -141,7 +153,12 @@ async def proxy_handler(request: Request, path: str):
     headers = dict(request.headers)
     headers.pop("host", None)
     params = dict(request.query_params)
-    content = await request.body()
+
+    try:
+        content = await request.body()
+    except Exception as e:
+        logger.error(f"Failed to read request body: {e}")
+        content = b""
 
     async with httpx.AsyncClient() as client:
         try:
