@@ -22,5 +22,8 @@ COPY --from=frontend-build /frontend/dist /app/static
 
 EXPOSE 10000
 
-# Ensure the app uses the dynamic PORT env var
+ENV PORT=10000
+
+# Using sh -c to ensure environment variables like PORT are expanded if necessary,
+# though uvicorn handles it well. Explicitly setting port 10000 for Render.
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}"]

@@ -1,21 +1,22 @@
 import asyncio
+import os
+import json
+import logging
+from datetime import datetime
+from typing import List
+
+import httpx
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
-import httpx
 from redis.asyncio import Redis
+
 from config import settings
 from app.middleware.security import SecurityMiddleware
 from app.middleware.rate_limiter import RateLimiter
 from app.logging.event_logger import event_logger
 from app.explainability.llm_explainer import llm_explainer
 from app.models.schemas import ThreatEvent
-import logging
-from typing import List
-import os
-import json
-from datetime import datetime
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +39,7 @@ class ConnectionManager:
 
     async def broadcast(self, message: dict):
         def json_serial(obj):
-            if isinstance(obj, (datetime)):
+            if isinstance(obj, datetime):
                 return obj.isoformat()
             return str(obj)
 
@@ -94,11 +95,13 @@ async def startup_event():
         logger.error(f"MongoDB not available: {e}")
 
     try:
+        # Strictly use REDIS_URL from settings
         redis = Redis.from_url(settings.REDIS_URL)
         rate_limiter_wrapper.limiter = RateLimiter(redis)
         app.state.redis = redis
+        logger.info(f"Connected to Redis at {settings.REDIS_URL}")
     except Exception as e:
-        logger.error(f"Redis not available: {e}")
+        logger.error(f"Redis connection failed: {e}")
 
     logger.info("V.A.A.S Guard Backend Started")
 
