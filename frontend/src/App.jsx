@@ -34,7 +34,11 @@ function App() {
 
   const connectWS = () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.hostname === 'localhost' ? 'localhost:8000' : window.location.host;
+    const host = import.meta.env.VITE_WS_URL
+      ? import.meta.env.VITE_WS_URL.replace('https://', '').replace('wss://', '')
+      : window.location.hostname === 'localhost'
+        ? 'localhost:10000'
+        : window.location.hostname;
     ws.current = new WebSocket(`${protocol}//${host}/ws/logs`);
 
     ws.current.onopen = () => setConnected(true);
