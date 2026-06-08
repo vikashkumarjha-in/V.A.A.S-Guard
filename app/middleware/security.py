@@ -118,6 +118,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                     content={"detail": "Security breach detected"}
                 )
 
+            # Rebuild body so downstream can read it
             async def receive():
                 return {
                     "type": "http.request",

@@ -4,6 +4,7 @@ import json
 import logging
 from datetime import datetime
 from typing import List
+from functools import partial
 
 import httpx
 from fastapi import FastAPI, Request, WebSocket
@@ -153,10 +154,12 @@ rate_limiter_wrapper = RateLimiterWrapper()
 # =====================================================
 
 app.add_middleware(
-    SecurityMiddleware,
-    rate_limiter=rate_limiter_wrapper,
-    ws_manager=manager,
-    background_processor=process_threat_explanation
+    partial(
+        SecurityMiddleware,
+        rate_limiter=rate_limiter_wrapper,
+        ws_manager=manager,
+        background_processor=process_threat_explanation
+    )
 )
 
 
