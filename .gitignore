@@ -4,3 +4,7 @@ __pycache__/
 dist/
 node_modules/
 static/
+_pycache_/
+*.pyc
+_pycache_/
+*.pyc

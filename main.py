@@ -7,9 +7,9 @@ from typing import List
 from functools import partial
 
 import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from redis.asyncio import Redis
 
@@ -20,13 +20,16 @@ from app.logging.event_logger import event_logger
 from app.explainability.llm_explainer import llm_explainer
 from app.models.schemas import ThreatEvent
 
-# Setup Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="V.A.S Guard Proxy")
 
-# 1. CORS must be first
+
+# =====================================================
+# CORS
+# =====================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,8 +38,13 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# 2. WebSocket Manager
+
+# =====================================================
+# WebSocket Manager
+# =====================================================
+
 class ConnectionManager:
+
     def __init__(self):
         self.active_connections: List[WebSocket] = []
 
@@ -45,58 +53,106 @@ class ConnectionManager:
             await websocket.accept()
             self.active_connections.append(websocket)
         except Exception as e:
-            logger.error(f"WS accept failed: {e}")
+            logger.error(f"WebSocket connect failed: {e}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
-        def json_serial(obj):
+
+        def json_serializer(obj):
             if isinstance(obj, datetime):
                 return obj.isoformat()
             return str(obj)
 
-        msg_str = json.dumps(message, default=json_serial)
-        for connection in self.active_connections[:]:
+        message_str = json.dumps(
+            message,
+            default=json_serializer
+        )
+
+        dead_connections = []
+
+        for connection in self.active_connections:
             try:
-                await connection.send_text(msg_str)
+                await connection.send_text(message_str)
             except Exception:
-                self.active_connections.remove(connection)
+                dead_connections.append(connection)
+
+        for conn in dead_connections:
+            self.disconnect(conn)
+
 
 manager = ConnectionManager()
 
-# 3. Background Tasks
+
+# =====================================================
+# Threat Explanation Worker
+# =====================================================
+
 async def process_threat_explanation(event_dict: dict):
+
     try:
         event = ThreatEvent(**event_dict)
-        explanation = await llm_explainer.explain_threat(event)
+
+        explanation = await llm_explainer.explain_threat(
+            event
+        )
+
         try:
-            await event_logger.update_explanation(event.event_id, explanation)
-        except Exception as e:
-            logger.error(f"Mongo update failed: {e}")
+            await event_logger.update_explanation(
+                event.event_id,
+                explanation
+            )
+        except Exception as mongo_error:
+            logger.error(
+                f"Mongo update failed: {mongo_error}"
+            )
 
         event.explanation = explanation
         event.status = "Analyzed"
-        await manager.broadcast(event.dict())
+
+        await manager.broadcast(
+            event.model_dump()
+        )
+
     except Exception as e:
-        logger.error(f"LLM task failed: {e}")
+        logger.error(
+            f"Threat explanation failed: {e}"
+        )
+
+
+# =====================================================
+# Rate Limiter Wrapper
+# =====================================================
 
 class RateLimiterWrapper:
+
     def __init__(self):
         self.limiter = None
 
     async def is_rate_limited(self, ip):
-        if self.limiter:
-            try:
-                return await self.limiter.is_rate_limited(ip)
-            except Exception:
-                return False
-        return False
+
+        if not self.limiter:
+            return False
+
+        try:
+            return await self.limiter.is_rate_limited(ip)
+
+        except Exception as e:
+            logger.error(
+                f"Rate limiter error: {e}"
+            )
+            return False
+
 
 rate_limiter_wrapper = RateLimiterWrapper()
 
-# 4. Middleware Registration - use partial to avoid BaseHTTPMiddleware kwargs error
+
+# =====================================================
+# Security Middleware
+# =====================================================
+
 app.add_middleware(
     partial(
         SecurityMiddleware,
@@ -106,84 +162,204 @@ app.add_middleware(
     )
 )
 
-# 5. Lifecycle
+
+# =====================================================
+# Startup
+# =====================================================
+
 @app.on_event("startup")
 async def startup_event():
+
     try:
         await event_logger.initialize()
+
     except Exception as e:
-        logger.error(f"MongoDB offline: {e}")
+        logger.error(
+            f"MongoDB initialization failed: {e}"
+        )
 
     try:
-        redis = Redis.from_url(settings.REDIS_URL)
-        rate_limiter_wrapper.limiter = RateLimiter(redis)
-        app.state.redis = redis
-        logger.info(f"Redis linked: {settings.REDIS_URL}")
-    except Exception as e:
-        logger.error(f"Redis link failed: {e}")
+        redis = Redis.from_url(
+            settings.REDIS_URL,
+            decode_responses=True
+        )
 
-    logger.info("V.A.S Guard Engine Running")
+        rate_limiter_wrapper.limiter = RateLimiter(
+            redis_client=redis,
+            limit=100,
+            window=60
+        )
+
+        app.state.redis = redis
+
+        logger.info(
+            f"Redis connected: {settings.REDIS_URL}"
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Redis connection failed: {e}"
+        )
+
+    logger.info("V.A.S Guard started")
+
+
+# =====================================================
+# Shutdown
+# =====================================================
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    if hasattr(app.state, "redis"):
-        await app.state.redis.close()
 
-# 6. Routes
+    if hasattr(app.state, "redis"):
+        await app.state.redis.aclose()
+
+
+# =====================================================
+# Health Endpoint
+# =====================================================
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
+
+# =====================================================
+# WebSocket Logs
+# =====================================================
+
 @app.websocket("/ws/logs")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_logs(websocket: WebSocket):
+
     await manager.connect(websocket)
+
     try:
         while True:
             await websocket.receive_text()
+
     except Exception:
         pass
+
     finally:
         manager.disconnect(websocket)
 
-# 7. Static Dashboard
+
+# =====================================================
+# Dashboard Static Files
+# =====================================================
+
 if os.path.exists("static"):
-    app.mount("/dashboard", StaticFiles(directory="static", html=True), name="static")
+    app.mount(
+        "/dashboard",
+        StaticFiles(
+            directory="static",
+            html=True
+        ),
+        name="dashboard"
+    )
 
-# 8. Transparent Proxy
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-async def proxy_handler(request: Request, path: str):
-    if path.startswith("dashboard") or path == "health" or path == "ws/logs":
-         return Response(status_code=404)
 
-    url = f"{settings.TARGET_URL}/{path}"
-    method = request.method
+# =====================================================
+# Reverse Proxy
+# =====================================================
+
+@app.api_route(
+    "/{path:path}",
+    methods=[
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH",
+        "OPTIONS"
+    ]
+)
+async def proxy_handler(
+    request: Request,
+    path: str
+):
+
+    if (
+        path == "health"
+        or path == "ws/logs"
+        or path.startswith("dashboard")
+    ):
+        return Response(status_code=404)
+
+    target_url = (
+        f"{settings.TARGET_URL}/{path}"
+    )
+
     headers = dict(request.headers)
     headers.pop("host", None)
+
     params = dict(request.query_params)
 
     try:
-        content = await request.body()
+        body = await request.body()
     except Exception:
-        content = b""
+        body = b""
 
-    async with httpx.AsyncClient() as client:
-        try:
-            proxy_response = await client.request(
-                method, url, params=params, headers=headers, content=content,
+    try:
+
+        async with httpx.AsyncClient() as client:
+
+            upstream_response = await client.request(
+                method=request.method,
+                url=target_url,
+                headers=headers,
+                params=params,
+                content=body,
                 timeout=settings.PROXY_TIMEOUT
             )
+
+            excluded_headers = {
+                "content-encoding",
+                "transfer-encoding",
+                "connection"
+            }
+
+            response_headers = {
+                k: v
+                for k, v in upstream_response.headers.items()
+                if k.lower() not in excluded_headers
+            }
+
             return StreamingResponse(
-                proxy_response.aiter_raw(),
-                status_code=proxy_response.status_code,
-                headers=dict(proxy_response.headers)
+                upstream_response.aiter_raw(),
+                status_code=upstream_response.status_code,
+                headers=response_headers
             )
-        except httpx.TimeoutException:
-            return Response(content="Gateway Timeout", status_code=504)
-        except Exception as e:
-            logger.error(f"Proxy fail: {e}")
-            return Response(content="Internal error", status_code=500)
+
+    except httpx.TimeoutException:
+
+        return Response(
+            content="Gateway Timeout",
+            status_code=504
+        )
+
+    except Exception as e:
+
+        logger.error(
+            f"Proxy error: {e}"
+        )
+
+        return Response(
+            content="Internal Server Error",
+            status_code=500
+        )
+
 
 if __name__ == "__main__":
+
     import uvicorn
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
+    port = int(
+        os.environ.get("PORT", 10000)
+    )
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port
+    )
